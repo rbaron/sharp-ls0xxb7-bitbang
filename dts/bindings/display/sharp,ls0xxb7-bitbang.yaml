@@ -1,0 +1,63 @@
+# Copyright 2025 Nordic Semiconductor
+#
+# SPDX-License-Identifier: Apache-2.0
+
+description: |
+  Sharp 64 color memory-in-pixel bit banged controller. Emulates proprietary parallel interface.
+
+compatible: "sharp,ls0xxb7-bitbang"
+
+include: [display-controller.yaml]
+
+properties:
+  rgb-gpios:
+    type: phandle-array
+    required: true
+    description: |
+      Must contain references to 6 GPIO for 2 bit RGB color.
+  intb-gpios:
+    type: phandle-array
+    required: true
+    description: |
+      Initial signal for binary driver && gate driver
+  gsp-gpios:
+    type: phandle-array
+    required: true
+    description: |
+      Start signal for gate driver
+  gck-gpios:
+    type: phandle-array
+    required: true
+    description: |
+      Clock for gate driver
+  gen-gpios:
+    type: phandle-array
+    required: true
+    description: |
+      Gate enable
+  bsp-gpios:
+    type: phandle-array
+    required: true
+    description: |
+      Start signal for binary driver
+  bck-gpios:
+    type: phandle-array
+    required: true
+    description: |
+      Clock for binary driver
+  vb-gpios:
+    type: phandle-array
+    required: true
+    description: VB black signal voltage for LCD, also connected to VCOM.
+  va-gpios:
+    type: phandle-array
+    required: true
+    description: VA, white signal voltage for LCD.
+  vcom-freq:
+    type: int
+    default: 30
+    enum:
+      - 30
+      - 60
+    description: |
+      Frequency of VCOM in Hertz

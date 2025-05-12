@@ -1,0 +1,86 @@
+/delete-node/ &pwm20;
+
+/delete-node/ &uart30;
+
+/delete-node/ &spi00;
+
+/delete-node/ &pwm_led1;
+
+&pinctrl {
+	/delete-node/ spi00_default;
+	/delete-node/ spi00_sleep;
+	/delete-node/ uart30_default;
+	/delete-node/ uart30_sleep;
+	/delete-node/ pwm20_default;
+	/delete-node/ pwm20_sleep;
+
+	/omit-if-no-ref/ uart20_default: uart20_default {
+		group1 {
+			psels = <NRF_PSEL(UART_TX, 2, 10)>;
+		};
+		group2 {
+			psels = <NRF_PSEL(UART_RX, 2, 9)>;
+			bias-pull-up;
+		};
+	};
+
+	/omit-if-no-ref/ uart20_sleep: uart20_sleep {
+		group1 {
+			psels = <NRF_PSEL(UART_TX, 2, 10)>,
+							<NRF_PSEL(UART_RX, 2, 9)>;
+			low-power-enable;
+		};
+	};
+};
+
+&uart20 {
+	current-speed = <115200>;
+	pinctrl-0 = <&uart20_default>;
+	pinctrl-1 = <&uart20_sleep>;
+	pinctrl-names = "default", "sleep";
+};
+
+/ {
+
+	chosen {
+		zephyr,display = &sharp_display;
+	};
+
+	sharp_display: sharp_ls0xxb7_bitbang {
+		compatible = "sharp,ls0xxb7-bitbang";
+		status = "okay";
+		height = <280>;
+		width = <280>;
+		rgb-gpios =
+								<&gpio1 12 GPIO_ACTIVE_HIGH>,
+								<&gpio0 0 GPIO_ACTIVE_HIGH>,  // r1 [1]
+								<&gpio1 13 GPIO_ACTIVE_HIGH>, // g0 [2]
+								<&gpio0 3 GPIO_ACTIVE_HIGH>,  // g1 [3]
+								<&gpio1 14 GPIO_ACTIVE_HIGH>, // b0 [4]
+								<&gpio0 2 GPIO_ACTIVE_HIGH>;  // b1 [5]
+								intb-gpios = <&gpio1 7 GPIO_ACTIVE_HIGH>;
+		gsp-gpios = <&gpio1 9 GPIO_ACTIVE_HIGH>;
+		gck-gpios = <&gpio1 6 GPIO_ACTIVE_HIGH>;
+		gen-gpios = <&gpio1 10 GPIO_ACTIVE_HIGH>;
+		bsp-gpios = <&gpio1 11 GPIO_ACTIVE_HIGH>;
+		bck-gpios = <&gpio0 1 GPIO_ACTIVE_HIGH>;
+		vb-gpios = <&gpio0 4 GPIO_ACTIVE_HIGH>;
+		va-gpios = <&gpio1 8 GPIO_ACTIVE_HIGH>;
+		vcom-freq = <30>;
+	};
+	/delete-node/ aliases;
+
+
+	leds {
+		compatible = "gpio-leds";
+		vddio_en: vddio_en {
+			gpios = <&gpio1 5 GPIO_ACTIVE_HIGH>;
+			label = "VDDIO_EN";
+		};
+
+		vbus_en: vbus_en {
+			gpios = <&gpio1 4 GPIO_ACTIVE_HIGH>;
+			label = "VBUS_EN";
+		};
+	};
+};

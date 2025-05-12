@@ -1,80 +1,99 @@
-/*
- * Copyright (c) 2021 Nordic Semiconductor ASA
- * SPDX-License-Identifier: Apache-2.0
- */
-
+#include <lvgl.h>
+#include <lvgl_display.h>
+#include <stdio.h>
+#include <zephyr/device.h>
+#include <zephyr/drivers/display.h>
+#include <zephyr/drivers/gpio.h>
+#include <zephyr/dt-bindings/gpio/nordic-nrf-gpio.h>
 #include <zephyr/kernel.h>
-#include <zephyr/drivers/sensor.h>
 #include <zephyr/logging/log.h>
 
-#include <app/drivers/blink.h>
+LOG_MODULE_REGISTER(main, CONFIG_DISPLAY_LOG_LEVEL);
 
-#include <app_version.h>
+// #define DISPLAY_H DT_PROP(DT_NODELABEL(sharp_display), height)
+// #define DISPLAY_W DT_PROP(DT_NODELABEL(sharp_display), width)
 
-LOG_MODULE_REGISTER(main, CONFIG_APP_LOG_LEVEL);
+static const struct device *display_dev =
+    // DEVICE_DT_GET(DT_NODELABEL(sharp_display));
+    DEVICE_DT_GET(DT_CHOSEN(zephyr_display));
 
-#define BLINK_PERIOD_MS_STEP 100U
-#define BLINK_PERIOD_MS_MAX  1000U
+static const struct gpio_dt_spec vddio_en =
+    GPIO_DT_SPEC_GET(DT_NODELABEL(vddio_en), gpios);
+static const struct gpio_dt_spec vbus_en =
+    GPIO_DT_SPEC_GET(DT_NODELABEL(vbus_en), gpios);
 
-int main(void)
-{
-	int ret;
-	unsigned int period_ms = BLINK_PERIOD_MS_MAX;
-	const struct device *sensor, *blink;
-	struct sensor_value last_val = { 0 }, val;
+static const struct gpio_dt_spec led0 =
+    GPIO_DT_SPEC_GET(DT_NODELABEL(led0), gpios);
 
-	printk("Zephyr Example Application %s\n", APP_VERSION_STRING);
+int main(void) {
+  gpio_pin_configure_dt(&vddio_en, GPIO_OUTPUT_HIGH);
+  gpio_pin_configure_dt(&vbus_en, GPIO_OUTPUT_HIGH);
+  gpio_pin_configure_dt(&led0, GPIO_OUTPUT);
 
-	sensor = DEVICE_DT_GET(DT_NODELABEL(example_sensor));
-	if (!device_is_ready(sensor)) {
-		LOG_ERR("Sensor not ready");
-		return 0;
-	}
+  // Power up.
+  gpio_pin_set_dt(&vddio_en, 1);
+  k_busy_wait(1000);
+  gpio_pin_set_dt(&vbus_en, 1);
+  k_busy_wait(1000);
 
-	blink = DEVICE_DT_GET(DT_NODELABEL(blink_led));
-	if (!device_is_ready(blink)) {
-		LOG_ERR("Blink LED not ready");
-		return 0;
-	}
+  if (!device_is_ready(display_dev)) {
+    LOG_ERR("Device not ready, aborting test");
+    return 0;
+  }
 
-	ret = blink_off(blink);
-	if (ret < 0) {
-		LOG_ERR("Could not turn off LED (%d)", ret);
-		return 0;
-	}
+  lv_obj_t *scr = lv_scr_act();
 
-	printk("Use the sensor to change LED blinking period\n");
+  // Square.
+  lv_obj_t *square = lv_obj_create(scr);
+  lv_obj_set_style_bg_opa(square, LV_OPA_COVER, LV_PART_MAIN);
+  lv_obj_set_size(square, 128, 128);
+  lv_obj_align(square, LV_ALIGN_CENTER, 0, 0);
 
-	while (1) {
-		ret = sensor_sample_fetch(sensor);
-		if (ret < 0) {
-			LOG_ERR("Could not fetch sample (%d)", ret);
-			return 0;
-		}
+  // Text.
+  lv_obj_t *label = lv_label_create(scr);
+  lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
+  lv_obj_set_width(label, 110);
+  lv_label_set_text(label, "Hello, world");
+  lv_obj_align(label, LV_ALIGN_CENTER, 0, 0);
 
-		ret = sensor_channel_get(sensor, SENSOR_CHAN_PROX, &val);
-		if (ret < 0) {
-			LOG_ERR("Could not get sample (%d)", ret);
-			return 0;
-		}
+#if CONFIG_SHARP_LS0XXB7_DISPLAY_MODE_MONOCHROME
+  lv_obj_set_style_bg_color(square, lv_color_black(), LV_PART_MAIN);
+#elif CONFIG_SHARP_LS0XXB7_DISPLAY_MODE_COLOR
+  // Paint background white.
+  static lv_style_t style_bg_white;
+  lv_style_init(&style_bg_white);
+  lv_style_set_bg_color(&style_bg_white, lv_color_white());
+  // lv_style_set_bg_color(&style_bg_white, lv_color_hex(0x0000ff));
+  lv_style_set_bg_opa(&style_bg_white, LV_OPA_COVER);
+  lv_obj_add_style(scr, &style_bg_white, LV_PART_MAIN);
 
-		if ((last_val.val1 == 0) && (val.val1 == 1)) {
-			if (period_ms == 0U) {
-				period_ms = BLINK_PERIOD_MS_MAX;
-			} else {
-				period_ms -= BLINK_PERIOD_MS_STEP;
-			}
+  // Square.
+  static lv_style_t style;
+  lv_style_init(&style);
+  lv_style_set_bg_color(&style, lv_color_hex(0x00ff00));
+  lv_style_set_border_color(&style, lv_color_hex(0x0000ff));
+  lv_style_set_border_width(&style, 4);
+  lv_obj_add_style(square, &style, LV_PART_MAIN);
+  lv_obj_update_layout(square);
 
-			printk("Proximity detected, setting LED period to %u ms\n",
-			       period_ms);
-			blink_set_period_ms(blink, period_ms);
-		}
+  // Paint text red.
+  static lv_style_t style_red;
+  lv_style_init(&style_red);
+  lv_style_set_text_color(&style_red, lv_color_hex(0xff0000));
+  lv_obj_add_style(label, &style_red, LV_PART_MAIN);
+#endif  // CONFIG_SHARP_LS0XXB7_DISPLAY_MODE_COLOR
 
-		last_val = val;
+  int x = 100;
+  char buf[32];
+  while (1) {
+    lv_task_handler();
+    k_msleep(1000);
 
-		k_sleep(K_MSEC(100));
-	}
+    // Update counter.
+    snprintf(buf, sizeof(buf), "x: %d", x);
+    lv_label_set_text(label, buf);
+    x += 1;
+  }
 
-	return 0;
+  return 0;
 }
-
