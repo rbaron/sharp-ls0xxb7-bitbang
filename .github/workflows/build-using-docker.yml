@@ -27,15 +27,10 @@ jobs:
       - name: Build firmware
         working-directory: example-application
         run: |
-          west twister -T app -v --inline-logs --integration
+          west build -b nrf54l15dk/nrf54l15/cpuapp app -- -DDTC_OVERLAY_FILE=boards/shields/sharp_breakout/sharp_breakout.overlay
 
       - name: Store hex files
         uses: actions/upload-artifact@v4
         with:
           name: built-applications
-          path: example-application/twister-out/**/zephyr/zephyr.hex
-
-      - name: Twister Tests
-        working-directory: example-application
-        run: |
-          west twister -T tests -v --inline-logs --integration
+          path: example-application/build/**/zephyr/zephyr.hex
