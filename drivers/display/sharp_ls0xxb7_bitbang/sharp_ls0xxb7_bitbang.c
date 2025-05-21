@@ -45,6 +45,14 @@ struct sharp_mip_config {
   int vcom_freq;
 };
 
+// Look-up table.
+struct lut_mask {
+  gpio_port_value_t val;
+};
+
+// Ports.
+static struct lut_mask lut_masks[3][4];
+
 static void vcom_thread(void *config, void *unused1, void *unused2) {
   const struct sharp_mip_config *cfg = config;
 
@@ -56,6 +64,33 @@ static void vcom_thread(void *config, void *unused1, void *unused2) {
     gpio_pin_toggle_dt(&cfg->vcom_vb);
     gpio_pin_toggle_dt(&cfg->va);
     k_msleep(1000 / cfg->vcom_freq);
+  }
+}
+
+static void build_lut_masks(const struct sharp_mip_config *cfg,
+                            const struct sharp_mip_data *data) {
+  for (int port_idx = 0;
+       port_idx < sizeof(data->rgb_ports) / sizeof(data->rgb_ports[0]);
+       port_idx++) {
+    struct lut_mask *msk = &lut_masks[port_idx];
+    for (int i = 0; i < 4; i++) {
+      // State.
+      msk[i].val = 0;
+
+      bool hasx0 = i & 1;
+      bool hasx1 = i & 2;
+
+      if (hasx0) {
+        msk[i].val |= BIT(cfg->rgb[0].pin);
+        msk[i].val |= BIT(cfg->rgb[2].pin);
+        msk[i].val |= BIT(cfg->rgb[4].pin);
+      }
+      if (hasx1) {
+        msk[i].val |= BIT(cfg->rgb[1].pin);
+        msk[i].val |= BIT(cfg->rgb[3].pin);
+        msk[i].val |= BIT(cfg->rgb[5].pin);
+      }
+    }
   }
 }
 
@@ -121,6 +156,8 @@ static int sharp_mip_init(const struct device *dev) {
             data->rgb_ports[i].rgb_idx_mask);
   }
 
+  build_lut_masks(config, data);
+
   return 0;
 }
 
@@ -149,7 +186,67 @@ static inline void set_rgb(bool is_msb, int x0, const uint8_t *buf,
        : 0)
 
   // Offset into buf for 16-bit RGB565 data at column x0.
-  const uint8_t *b = buf + 2 * x0;
+  // const uint8_t *b = buf + 2 * x0;
+  const uint8_t *b = buf + (x0 << 1);
+
+  int port_idx = 0;
+  // for (int port_idx = 0;
+  //      port_idx < sizeof(data->rgb_ports) / sizeof(data->rgb_ports[0]);
+  //      port_idx++) {
+  // Skip port if it's not connected to any RGB pins.
+  // if (data->rgb_ports[port_idx].port == NULL) {
+  //   continue;
+  // }
+
+  // int64_t t0 = k_cycle_get_64();
+
+  // For each BCK, we set lsb/msb of pixel x and x + 1
+  const gpio_port_value_t val = VAL_BIT_IF_ON_PORT(port_idx, 0, _R(b + 0)) |
+                                VAL_BIT_IF_ON_PORT(port_idx, 1, _R(b + 2)) |
+                                VAL_BIT_IF_ON_PORT(port_idx, 2, _G(b + 0)) |
+                                VAL_BIT_IF_ON_PORT(port_idx, 3, _G(b + 2)) |
+                                VAL_BIT_IF_ON_PORT(port_idx, 4, _B(b + 0)) |
+                                VAL_BIT_IF_ON_PORT(port_idx, 5, _B(b + 2));
+
+  // const gpio_port_value_t val = 0xaf;
+  // const gpio_port_value_t val = lut_masks[0][1].val;
+
+  // int64_t t1 = k_cycle_get_64();
+
+  // lut[b[0]].lsb will contain vals for pixel x:
+  // port0
+
+  // gpio_port_set_masked_raw(data->rgb_ports[port_idx].port,
+  //                          //  data->rgb_ports[port_idx].port_mask, val);
+  //                          data->rgb_ports[port_idx].port_mask, 0);
+
+  // NRF_P1->OUTCLR = data->rgb_ports[port_idx].port_mask;
+  // NRF_P1->OUTSET = val;
+
+  const gpio_port_pins_t mask = data->rgb_ports[port_idx].port_mask;
+  NRF_P1->OUT = (NRF_P1->OUT & ~mask) | (val & mask);
+
+  // int64_t t2 = k_cycle_get_64();
+
+  // LOG_INF("val: %lld | port_set: %lld", t1 - t0, t2 - t1);
+  // }
+
+#elif CONFIG_SHARP_LS0XXB7_DISPLAY_MODE_RGB2222
+
+#define GET_SIG_BIT(v, is_msb) ((v) >> ((is_msb) ? 0 : 1) & 0x1)
+  // #define GET_SIG_BIT(v, is_msb) (((v) >> 1) ^ (!is_msb & 0x1))
+
+#define _R(buf) (((buf)[0] >> 6) & 0x3)
+#define _G(buf) (((buf)[0] >> 4) & 0x3)
+#define _B(buf) (((buf)[0] >> 2) & 0x3)
+
+#define VAL_BIT_IF_ON_PORT(port, rgb_idx, v2bit)                   \
+  ((port_mask & BIT(rgb_idx))                                      \
+       ? (GET_SIG_BIT((v2bit), is_msb) << cfg->rgb[(rgb_idx)].pin) \
+       : 0)
+
+  // Offset into buf for 8-bit RGB2222 data at column x0.
+  const uint8_t *b = buf + x0;
 
   for (int port_idx = 0;
        port_idx < sizeof(data->rgb_ports) / sizeof(data->rgb_ports[0]);
@@ -159,12 +256,17 @@ static inline void set_rgb(bool is_msb, int x0, const uint8_t *buf,
       continue;
     }
 
-    const gpio_port_value_t val = VAL_BIT_IF_ON_PORT(port_idx, 0, _R(b + 0)) |
-                                  VAL_BIT_IF_ON_PORT(port_idx, 1, _R(b + 2)) |
-                                  VAL_BIT_IF_ON_PORT(port_idx, 2, _G(b + 0)) |
-                                  VAL_BIT_IF_ON_PORT(port_idx, 3, _G(b + 2)) |
-                                  VAL_BIT_IF_ON_PORT(port_idx, 4, _B(b + 0)) |
-                                  VAL_BIT_IF_ON_PORT(port_idx, 5, _B(b + 2));
+    // Cache mask.
+    const gpio_port_pins_t port_mask = data->rgb_ports[port_idx].port_mask;
+
+    const gpio_port_value_t val = VAL_BIT_IF_ON_PORT(port_mask, 0, _R(b + 0)) |
+                                  VAL_BIT_IF_ON_PORT(port_mask, 1, _R(b + 1)) |
+                                  VAL_BIT_IF_ON_PORT(port_mask, 2, _G(b + 0)) |
+                                  VAL_BIT_IF_ON_PORT(port_mask, 3, _G(b + 1)) |
+                                  VAL_BIT_IF_ON_PORT(port_mask, 4, _B(b + 0)) |
+                                  VAL_BIT_IF_ON_PORT(port_mask, 5, _B(b + 1));
+    // const gpio_port_value_t val =
+    //     VAL_BIT_IF_ON_PORT(port_idx, 0, _G(b + 0)) ? 0xff : 0x00;
 
     gpio_port_set_masked(data->rgb_ports[port_idx].port,
                          data->rgb_ports[port_idx].port_mask, val);
@@ -179,24 +281,39 @@ static inline void set_rgb(bool is_msb, int x0, const uint8_t *buf,
        ? (GET_BUF_BIT((buf), (x)) << cfg->rgb[(rgb_idx)].pin) \
        : 0)
 
-  for (int port_idx = 0;
-       port_idx < sizeof(data->rgb_ports) / sizeof(data->rgb_ports[0]);
-       port_idx++) {
-    // Skip port if it's not connected to any RGB pins.
-    if (data->rgb_ports[port_idx].port == NULL) {
-      continue;
-    }
+  // for (int port_idx = 0;
+  //      port_idx < sizeof(data->rgb_ports) / sizeof(data->rgb_ports[0]);
+  //      port_idx++) {
+  //   // Skip port if it's not connected to any RGB pins.
+  //   if (data->rgb_ports[port_idx].port == NULL) {
+  //     continue;
+  //   }
 
-    const gpio_port_value_t val = VAL_BIT_IF_ON_PORT(port_idx, 0, buf, x0 + 0) |
-                                  VAL_BIT_IF_ON_PORT(port_idx, 1, buf, x0 + 1) |
-                                  VAL_BIT_IF_ON_PORT(port_idx, 2, buf, x0 + 0) |
-                                  VAL_BIT_IF_ON_PORT(port_idx, 3, buf, x0 + 1) |
-                                  VAL_BIT_IF_ON_PORT(port_idx, 4, buf, x0 + 0) |
-                                  VAL_BIT_IF_ON_PORT(port_idx, 5, buf, x0 + 1);
+  const int port_idx = 0;
 
-    gpio_port_set_masked(data->rgb_ports[port_idx].port,
-                         data->rgb_ports[port_idx].port_mask, val);
-  }
+  // const gpio_port_value_t val = VAL_BIT_IF_ON_PORT(port_idx, 0, buf, x0 + 0)
+  // |
+  //                               VAL_BIT_IF_ON_PORT(port_idx, 1, buf, x0 + 1)
+  //                               | VAL_BIT_IF_ON_PORT(port_idx, 2, buf, x0 +
+  //                               0) | VAL_BIT_IF_ON_PORT(port_idx, 3, buf, x0
+  //                               + 1) | VAL_BIT_IF_ON_PORT(port_idx, 4, buf,
+  //                               x0 + 0) | VAL_BIT_IF_ON_PORT(port_idx, 5,
+  //                               buf, x0 + 1);
+
+  // uint8_t state = GET_BUF_BIT(buf, x0) | (GET_BUF_BIT(buf, x0 + 1) << 1);
+
+  // const gpio_port_value_t val = lut_masks[port_idx][state].val;
+  // const gpio_port_value_t val = 0;
+
+  // gpio_port_set_masked(data->rgb_ports[port_idx].port,
+  //                      data->rgb_ports[port_idx].port_mask, val);
+  // NRF_P1->OUTCLR = data->rgb_ports[0].port_mask;
+  // NRF_P1->OUTSET = 0x00;
+
+  const gpio_port_value_t val = 0xaa;
+  const gpio_port_pins_t mask = data->rgb_ports[port_idx].port_mask;
+  NRF_P1->OUT = (NRF_P1->OUT & ~mask) | (val & mask);
+  // }
 
 #endif  // CONFIG_SHARP_LS0XXB7_DISPLAY_MODE
 }
@@ -219,14 +336,24 @@ static inline void send_half_line(bool is_msb, const void *buf,
   set(&cfg->bsp);
 
   for (int i = 1; i <= 144; i++) {
-    toggle(&cfg->bck);
+    // toggle(&cfg->bck);
+    // Optimization.
+    NRF_P1->OUT ^= BIT(cfg->bck.pin);
 
     if (i == 2) {
       clear(&cfg->bsp);
     }
     if (i >= 1 && i <= 140) {
       // Prepare RGB pins for the next BCK edge.
-      set_rgb(is_msb, /*x0=*/2 * (i - 1), buf, cfg, data);
+      // int64_t t0 = k_cycle_get_64();
+      // set_rgb(is_msb, /*x0=*/2 * (i - 1), buf, cfg, data);
+      set_rgb(is_msb, /*x0=*/(i - 1) << 1, buf, cfg, data);
+      // Color:
+      // int64_t t1 = k_cycle_get_64();
+      // ~4 us.
+      // If only single port: 2-3 us.
+      // Single port, val = 0: 1-2 us.
+      // LOG_INF("set_rgb: %lld", t1 - t0);
     }
   }
 }
@@ -254,11 +381,12 @@ static int sharp_mip_write(const struct device *dev, const uint16_t x,
   // The last GCK index of the last sent half-line.
   const int gck_last_half_line = gck_offset + 2 * desc->height - 1;
 
-  LOG_DBG(
-      "Sharp MIP display write. x: %d, y: %d; buf size: %d (buf height: %d,buf "
-      "width: %d). Offset: %d, last: %d",
-      x, y, desc->buf_size, desc->height, desc->width, gck_offset,
-      gck_last_half_line);
+  // LOG_INF(
+  //     "Sharp MIP display write. x: %d, y: %d; buf size: %d (buf height: "
+  //     "%d,buf "
+  //     "width: %d). Offset: %d, last: %d",
+  //     x, y, desc->buf_size, desc->height, desc->width, gck_offset,
+  //     gck_last_half_line);
 
   clear(&cfg->gck);
   set(&cfg->intb);
@@ -286,13 +414,48 @@ static int sharp_mip_write(const struct device *dev, const uint16_t x,
       // Color buffer, 16 bits per pixel.
       // Each line has buf_width pixels, which is buf_width * 2.
       uint8_t *line_buf = (uint8_t *)buf + display_line * desc->width * 2;
+#elif CONFIG_SHARP_LS0XXB7_DISPLAY_MODE_RGB2222
+      // Color buffer, 8 bits per pixel.
+      // Each line has buf_width pixels, which is buf_width.
+      uint8_t *line_buf = (uint8_t *)buf + display_line * desc->width;
 #elif CONFIG_SHARP_LS0XXB7_DISPLAY_MODE_MONOCHROME
       // Monochrome buffer, 1 bit per pixel.
       // Each line has 280 pixels, which is 280 / 8 = 35 bytes.
       uint8_t *line_buf = (uint8_t *)buf + display_line * 35;
 #endif  // CONFIG_SHARP_LS0XXB7_DISPLAY_MODE
 
+      int64_t t0 = k_cycle_get_64();
       send_half_line(is_msb, line_buf, cfg, dev->data);
+      int64_t t1 = k_cycle_get_64();
+      LOG_INF("send_half_line: %lld", t1 - t0);
+
+      // With 90 rotation:
+
+      // Color:
+      // Default: 297 us.
+      // Single port, val = 0: 208 us.
+      // Direct NRF_P1 access, val = 0: 191 us.
+      // Direct NRF_P1 access, val = correct: 262 us.
+
+      // Direct NRF_PI access, toggling with NRF_P1, val default: 190 us.
+      // Direct NRF_P1 access, toggling with NRF_P1, val = 0xaf: 110 us.
+
+      // Monochrome:
+      // Default + LUT: 336 us !! WHY???
+      // Default, val = 0: 226 us !! WHY???
+      // Direct NRF_P1 access, val = 0: 200 us !!
+      // Direct NRF_P1 access, val = 0, single port: 191 us (same as color).
+
+      // NRF_P1 direct access for val and bck, val default: 190 us.
+      // NRF_P1 direct access for val and bck, val 0xaa: 110 us.
+
+      // Without rotation: same. Why does it feel slower? Because the pattern
+      // I'm using always cause it to refresh if done verticall? Yes! If I slide
+      // a vertical bar through the screen, it drops to 150 ms in PERF
+      // monitor. Mystery solved.
+      // The perf monitor itself updates the screen, and if it's v-tiled, it
+      // must update all the display.
+
       clear(&cfg->gen);
     } else if (i == gck_last_half_line + 1) {
       set(&cfg->gen);
@@ -320,14 +483,19 @@ static void sharp_mip_get_capabilities(
   // use it for 6-bit color here, saving us half the buffer size.
   capabilities->supported_pixel_formats = PIXEL_FORMAT_RGB_565;
   capabilities->current_pixel_format = PIXEL_FORMAT_RGB_565;
+#elif CONFIG_SHARP_LS0XXB7_DISPLAY_MODE_RGB2222
+  capabilities->supported_pixel_formats = PIXEL_FORMAT_L_8;
+  capabilities->current_pixel_format = PIXEL_FORMAT_L_8;
+  // capabilities->screen_info = SCREEN_INFO_MONO_VTILED;
 #elif CONFIG_SHARP_LS0XXB7_DISPLAY_MODE_MONOCHROME
   capabilities->supported_pixel_formats = PIXEL_FORMAT_MONO10;
   capabilities->current_pixel_format = PIXEL_FORMAT_MONO10;
+  // capabilities->screen_info = SCREEN_INFO_MONO_VTILED;
 #endif  // CONFIG_SHARP_LS0XXB7_DISPLAY_MODE
 
   // We need partial updates to contain full rows. Note that as of writing,
   // this flag only takes effect for monochrome pixel formats.
-  capabilities->screen_info = SCREEN_INFO_X_ALIGNMENT_WIDTH;
+  // capabilities->screen_info = SCREEN_INFO_X_ALIGNMENT_WIDTH;
 
   // TODO: get from config.
   capabilities->current_orientation = DISPLAY_ORIENTATION_NORMAL;
