@@ -216,15 +216,15 @@ static inline void set_rgb(bool is_msb, int x0, const uint8_t *buf,
   // lut[b[0]].lsb will contain vals for pixel x:
   // port0
 
-  // gpio_port_set_masked_raw(data->rgb_ports[port_idx].port,
-  //                          //  data->rgb_ports[port_idx].port_mask, val);
-  //                          data->rgb_ports[port_idx].port_mask, 0);
+  gpio_port_set_masked_raw(data->rgb_ports[port_idx].port,
+                           data->rgb_ports[port_idx].port_mask, val);
 
   // NRF_P1->OUTCLR = data->rgb_ports[port_idx].port_mask;
   // NRF_P1->OUTSET = val;
 
-  const gpio_port_pins_t mask = data->rgb_ports[port_idx].port_mask;
-  NRF_P1->OUT = (NRF_P1->OUT & ~mask) | (val & mask);
+  // This seems to be around the same speed as OUTCLR + OUTSET.
+  // const gpio_port_pins_t mask = data->rgb_ports[port_idx].port_mask;
+  // NRF_P1->OUT = (NRF_P1->OUT & ~mask) | (val & mask);
 
   // int64_t t2 = k_cycle_get_64();
 
@@ -324,11 +324,6 @@ static inline void set(const struct gpio_dt_spec *gpio) {
 static inline void clear(const struct gpio_dt_spec *gpio) {
   gpio_pin_set_raw(gpio->port, gpio->pin, 0);
 }
-static inline void toggle(const struct gpio_dt_spec *gpio) {
-  int val = gpio_pin_get_raw(gpio->port, gpio->pin);
-  gpio_pin_set_raw(gpio->port, gpio->pin, !val);
-}
-
 static inline void send_half_line(bool is_msb, const void *buf,
                                   const struct sharp_mip_config *cfg,
                                   const struct sharp_mip_data *data) {
@@ -336,9 +331,17 @@ static inline void send_half_line(bool is_msb, const void *buf,
   set(&cfg->bsp);
 
   for (int i = 1; i <= 144; i++) {
-    // toggle(&cfg->bck);
+    // Toggle BCK: 1 on odd, 0 on even.
+    gpio_pin_set_raw(cfg->bck.port, cfg->bck.pin, i & 1);
+
     // Optimization.
-    NRF_P1->OUT ^= BIT(cfg->bck.pin);
+    // With NRF_P1:
+    // NRF_P1->OUT ^= BIT(cfg->bck.pin);
+    // if (i & 1) {
+    //   NRF_P1->OUTSET = BIT(cfg->bck.pin);
+    // } else {
+    //   NRF_P1->OUTCLR = BIT(cfg->bck.pin);
+    // }
 
     if (i == 2) {
       clear(&cfg->bsp);
@@ -394,7 +397,7 @@ static int sharp_mip_write(const struct device *dev, const uint16_t x,
 
   // 1-indexed to match the datasheet and improve debugging.
   for (int i = 1; i <= 568; i++) {
-    toggle(&cfg->gck);
+    gpio_pin_set_raw(cfg->gck.port, cfg->gck.pin, i & 1);
 
     if (i == 2) {
       clear(&cfg->gsp);
@@ -437,8 +440,12 @@ static int sharp_mip_write(const struct device *dev, const uint16_t x,
       // Direct NRF_P1 access, val = 0: 191 us.
       // Direct NRF_P1 access, val = correct: 262 us.
 
-      // Direct NRF_PI access, toggling with NRF_P1, val default: 190 us.
-      // Direct NRF_P1 access, toggling with NRF_P1, val = 0xaf: 110 us.
+      // Single port:
+      // Direct NRF_P1, toggling with NRF_P1, val = 0xaf: 101 us.
+      // Direct NRF_P1, toggling with NRF_P1, val = correct: 167 us
+      // So the RGB calculation is consuming ~66 us.
+
+      // Set with gpio_raw_set, toggle with gpio_raw_set, val = correct: 207 us.
 
       // Monochrome:
       // Default + LUT: 336 us !! WHY???
