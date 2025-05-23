@@ -221,28 +221,31 @@ static inline void set_rgb(bool is_msb, int x0, const uint8_t *buf,
   // Offset into buf for 16-bit RGB565 data at column x0.
   const uint8_t *b = buf + (x0 << 1);
 
-  for (int port_idx = 0;
-       port_idx < sizeof(data->rgb_ports) / sizeof(data->rgb_ports[0]);
-       port_idx++) {
-    // Skip port if it's not connected to any RGB pins.
-    if (data->rgb_ports[port_idx].port == NULL) {
-      continue;
-    }
+  // for (int port_idx = 0;
+  //      port_idx < sizeof(data->rgb_ports) / sizeof(data->rgb_ports[0]);
+  //      port_idx++) {
+  //   // Skip port if it's not connected to any RGB pins.
+  //   if (data->rgb_ports[port_idx].port == NULL) {
+  //     continue;
+  //   }
+  int port_idx = 0;
 
-    gpio_port_value_t val;
-    uint8_t color_b0 = rgb222((uint16_t)b[1] << 8 | b[0]);
-    uint8_t color_b2 = rgb222((uint16_t)b[3] << 8 | b[2]);
-    if (is_msb) {
-      val = data->rgb_ports[port_idx].lut_entries[0][color_b0].msb_val |
-            data->rgb_ports[port_idx].lut_entries[1][color_b2].msb_val;
-    } else {
-      val = data->rgb_ports[port_idx].lut_entries[0][color_b0].lsb_val |
-            data->rgb_ports[port_idx].lut_entries[1][color_b2].lsb_val;
-    }
-
-    gpio_port_set_masked_raw(data->rgb_ports[port_idx].port,
-                             data->rgb_ports[port_idx].port_mask, val);
+  gpio_port_value_t val;
+  uint8_t color_b0 = rgb222((uint16_t)b[1] << 8 | b[0]);
+  uint8_t color_b2 = rgb222((uint16_t)b[3] << 8 | b[2]);
+  if (is_msb) {
+    val = data->rgb_ports[port_idx].lut_entries[0][color_b0].msb_val |
+          data->rgb_ports[port_idx].lut_entries[1][color_b2].msb_val;
+  } else {
+    val = data->rgb_ports[port_idx].lut_entries[0][color_b0].lsb_val |
+          data->rgb_ports[port_idx].lut_entries[1][color_b2].lsb_val;
   }
+
+  // gpio_port_set_masked_raw(data->rgb_ports[port_idx].port,
+  //                          data->rgb_ports[port_idx].port_mask, val);
+  // }
+  NRF_P1->OUTCLR = data->rgb_ports[port_idx].port_mask;
+  NRF_P1->OUTSET = val;
 
 #elif CONFIG_SHARP_LS0XXB7_DISPLAY_MODE_MONOCHROME
 
@@ -284,7 +287,12 @@ static inline void send_half_line(bool is_msb, const void *buf,
                                   const struct sharp_mip_data *data) {
   for (int i = 1; i <= 144; i++) {
     // Toggle BCK: 1 on odd, 0 on even.
-    gpio_pin_set_raw(cfg->bck.port, cfg->bck.pin, i & 1);
+    // gpio_pin_set_raw(cfg->bck.port, cfg->bck.pin, i & 1);
+    if (i & 1) {
+      NRF_P1->OUTSET = BIT(cfg->bck.pin);
+    } else {
+      NRF_P1->OUTCLR = BIT(cfg->bck.pin);
+    }
 
     if (i == 2) {
       clear(&cfg->bsp);
