@@ -11,7 +11,6 @@ LOG_MODULE_REGISTER(sharp_mip_parallel, CONFIG_DISPLAY_LOG_LEVEL);
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/kernel.h>
 
-// Look-up table.
 struct lut_entry {
   gpio_port_value_t lsb_val;
   gpio_port_value_t msb_val;
@@ -23,7 +22,7 @@ struct rgb_port {
   uint8_t rgb_idx_mask;
   gpio_port_pins_t port_mask;
 
-  // [odd/even][color]
+  // Lookup table from (odd/even, color) -> which pins to set on this port.
   struct lut_entry lut_entries[2][256];
 };
 
@@ -32,7 +31,7 @@ struct sharp_mip_data {
   K_KERNEL_STACK_MEMBER(vcom_thread_stack, /*size=*/256);
   struct k_thread vcom_thread;
 
-  // Optimization for RGB pins.
+  // Data about which RGB pins are on which ports.
   struct rgb_port rgb_ports[2];
 };
 
@@ -235,39 +234,28 @@ static inline void set_rgb(bool is_msb, int x0, const uint8_t *buf,
        ? (GET_BUF_BIT((buf), (x)) << cfg->rgb[(rgb_idx)].pin) \
        : 0)
 
-  // for (int port_idx = 0;
-  //      port_idx < sizeof(data->rgb_ports) / sizeof(data->rgb_ports[0]);
-  //      port_idx++) {
-  //   // Skip port if it's not connected to any RGB pins.
-  //   if (data->rgb_ports[port_idx].port == NULL) {
-  //     continue;
-  //   }
+  for (int port_idx = 0;
+       port_idx < sizeof(data->rgb_ports) / sizeof(data->rgb_ports[0]);
+       port_idx++) {
+    // Skip port if it's not connected to any RGB pins.
+    if (data->rgb_ports[port_idx].port == NULL) {
+      continue;
+    }
 
-  const int port_idx = 0;
+    gpio_port_value_t val;
+    uint8_t color_bx0 = GET_BUF_BIT(buf, x0 + 0) ? 0xff : 0x00;
+    uint8_t color_bx1 = GET_BUF_BIT(buf, x0 + 1) ? 0xff : 0x00;
+    if (is_msb) {
+      val = data->rgb_ports[port_idx].lut_entries[0][color_bx0].msb_val |
+            data->rgb_ports[port_idx].lut_entries[1][color_bx1].msb_val;
+    } else {
+      val = data->rgb_ports[port_idx].lut_entries[0][color_bx0].lsb_val |
+            data->rgb_ports[port_idx].lut_entries[1][color_bx1].lsb_val;
+    }
 
-  // const gpio_port_value_t val = VAL_BIT_IF_ON_PORT(port_idx, 0, buf, x0 + 0)
-  // |
-  //                               VAL_BIT_IF_ON_PORT(port_idx, 1, buf, x0 + 1)
-  //                               | VAL_BIT_IF_ON_PORT(port_idx, 2, buf, x0 +
-  //                               0) | VAL_BIT_IF_ON_PORT(port_idx, 3, buf, x0
-  //                               + 1) | VAL_BIT_IF_ON_PORT(port_idx, 4, buf,
-  //                               x0 + 0) | VAL_BIT_IF_ON_PORT(port_idx, 5,
-  //                               buf, x0 + 1);
-
-  // uint8_t state = GET_BUF_BIT(buf, x0) | (GET_BUF_BIT(buf, x0 + 1) << 1);
-
-  // const gpio_port_value_t val = lut_masks[port_idx][state].val;
-  // const gpio_port_value_t val = 0;
-
-  // gpio_port_set_masked(data->rgb_ports[port_idx].port,
-  //                      data->rgb_ports[port_idx].port_mask, val);
-  // NRF_P1->OUTCLR = data->rgb_ports[0].port_mask;
-  // NRF_P1->OUTSET = 0x00;
-
-  const gpio_port_value_t val = 0xaa;
-  const gpio_port_pins_t mask = data->rgb_ports[port_idx].port_mask;
-  NRF_P1->OUT = (NRF_P1->OUT & ~mask) | (val & mask);
-  // }
+    gpio_port_set_masked(data->rgb_ports[port_idx].port,
+                         data->rgb_ports[port_idx].port_mask, val);
+  }
 
 #endif  // CONFIG_SHARP_LS0XXB7_DISPLAY_MODE
 }
