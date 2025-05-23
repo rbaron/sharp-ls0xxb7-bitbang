@@ -11,11 +11,21 @@ LOG_MODULE_REGISTER(sharp_mip_parallel, CONFIG_DISPLAY_LOG_LEVEL);
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/kernel.h>
 
+// Look-up table.
+struct lut_entry {
+  gpio_port_value_t lsb_val;
+  gpio_port_value_t msb_val;
+};
+
 struct rgb_port {
   const struct device *port;
   // Bitmask of GPIO indexed into config->rgb that are connected to this port.
   uint8_t rgb_idx_mask;
   gpio_port_pins_t port_mask;
+
+  // gpio_port_value_t vals[256];
+  // [odd/even][color]
+  struct lut_entry lut_entries[2][256];
 };
 
 // Private mutable data for the driver.
@@ -45,14 +55,6 @@ struct sharp_mip_config {
   int vcom_freq;
 };
 
-// Look-up table.
-struct lut_mask {
-  gpio_port_value_t val;
-};
-
-// Ports.
-static struct lut_mask lut_masks[3][4];
-
 static void vcom_thread(void *config, void *unused1, void *unused2) {
   const struct sharp_mip_config *cfg = config;
 
@@ -64,33 +66,6 @@ static void vcom_thread(void *config, void *unused1, void *unused2) {
     gpio_pin_toggle_dt(&cfg->vcom_vb);
     gpio_pin_toggle_dt(&cfg->va);
     k_msleep(1000 / cfg->vcom_freq);
-  }
-}
-
-static void build_lut_masks(const struct sharp_mip_config *cfg,
-                            const struct sharp_mip_data *data) {
-  for (int port_idx = 0;
-       port_idx < sizeof(data->rgb_ports) / sizeof(data->rgb_ports[0]);
-       port_idx++) {
-    struct lut_mask *msk = &lut_masks[port_idx];
-    for (int i = 0; i < 4; i++) {
-      // State.
-      msk[i].val = 0;
-
-      bool hasx0 = i & 1;
-      bool hasx1 = i & 2;
-
-      if (hasx0) {
-        msk[i].val |= BIT(cfg->rgb[0].pin);
-        msk[i].val |= BIT(cfg->rgb[2].pin);
-        msk[i].val |= BIT(cfg->rgb[4].pin);
-      }
-      if (hasx1) {
-        msk[i].val |= BIT(cfg->rgb[1].pin);
-        msk[i].val |= BIT(cfg->rgb[3].pin);
-        msk[i].val |= BIT(cfg->rgb[5].pin);
-      }
-    }
   }
 }
 
@@ -147,7 +122,76 @@ static int sharp_mip_init(const struct device *dev) {
     }
   }
 
-  LOG_DBG("Sharp MIP display initialized. Resolution: %dx%d", config->width,
+  // Populate LUT.
+  for (int port_idx = 0;
+       port_idx < sizeof(data->rgb_ports) / sizeof(data->rgb_ports[0]);
+       port_idx++) {
+    // Not needed?
+    memset(data->rgb_ports[port_idx].lut_entries, 0,
+           sizeof(data->rgb_ports[port_idx].lut_entries));
+
+    // Pins on this port.
+    const gpio_port_pins_t mask = data->rgb_ports[port_idx].port_mask;
+
+    // Test.
+    if (port_idx != 0) {
+      continue;
+    }
+
+    for (int rgb_idx = 0; rgb_idx < 6; rgb_idx++) {
+      // If this pin is not on this port, continue.
+      if ((mask & BIT(config->rgb[rgb_idx].pin)) == 0) {
+        LOG_INF("Skipping pin %d on port %d (mask: 0x%02x)", rgb_idx, port_idx,
+                mask);
+        continue;
+      }
+
+      // For each possible color, precompute the val on this port.
+      for (int16_t i = 0; i < 256; i++) {
+        const uint8_t r = (i >> 4) & 0x03;
+        const uint8_t g = (i >> 2) & 0x03;
+        const uint8_t b = (i >> 0) & 0x03;
+
+        // Even or odd??
+        uint8_t oe = rgb_idx % 2;
+
+        // Which color?
+        uint8_t color;
+        switch (rgb_idx) {
+          case 0:
+          case 1:
+            color = r;
+            break;
+          case 2:
+          case 3:
+            color = g;
+            break;
+          case 4:
+          case 5:
+            color = b;
+            break;
+        }
+
+        // Set lsb.
+        data->rgb_ports[port_idx].lut_entries[oe][i].lsb_val |=
+            ((color >> 1) << config->rgb[rgb_idx].pin);
+
+        // Set msb.
+        data->rgb_ports[port_idx].lut_entries[oe][i].msb_val |=
+            ((color & 1) << config->rgb[rgb_idx].pin);
+
+        // if (i == 0x3f) {
+        //   LOG_INF(
+        //       "Color: 0x%02x | RGB %d: %d, %d, %d | lsb: 0x%02x | msb:
+        //       0x%02x", i, rgb_idx, r, g, b,
+        //       data->rgb_ports[port_idx].lut_entries[oe][i].lsb_val,
+        //       data->rgb_ports[port_idx].lut_entries[oe][i].msb_val);
+        // }
+      }
+    }
+  }
+
+  LOG_INF("Sharp MIP display initialized. Resolution: %dx%d", config->width,
           config->height);
 
   for (int i = 0; i < sizeof(data->rgb_ports) / sizeof(data->rgb_ports[0]);
@@ -156,10 +200,33 @@ static int sharp_mip_init(const struct device *dev) {
             data->rgb_ports[i].rgb_idx_mask);
   }
 
-  build_lut_masks(config, data);
-
   return 0;
 }
+
+static inline uint8_t rgb222(uint16_t rgb565) {
+  // Convert from RGB565 to RGB222 by dropping the least significant bits.
+  // return ((rgb565 >> 3) & 0x03) | (((rgb565 >> 4) & 0x03) << 2) |
+  //        (((rgb565 >> 8) & 0x03) << 4);
+
+  return ((((rgb565 >> 14) & 0x3) << 4) |  // R
+          (((rgb565 >> 9) & 0x3) << 2) |   // G
+          (((rgb565 >> 3) & 0x3) << 0));   // B
+}
+
+// uint8_t rgb222(uint16_t rgb565) {
+//   // Extract RGB565 components
+//   uint8_t r5 = (rgb565 >> 11) & 0x1F;  // 5 bits
+//   uint8_t g6 = (rgb565 >> 5) & 0x3F;   // 6 bits
+//   uint8_t b5 = rgb565 & 0x1F;          // 5 bits
+
+//   // Convert to 2 bits per channel (truncate or scale)
+//   uint8_t r2 = r5 >> 3;  // 5 bits to 2 bits (>> 3 drops lower bits)
+//   uint8_t g2 = g6 >> 4;  // 6 bits to 2 bits (>> 4 drops lower bits)
+//   uint8_t b2 = b5 >> 3;  // 5 bits to 2 bits
+
+//   // Pack into 6-bit RGB222: RR GG BB
+//   return (r2 << 4) | (g2 << 2) | b2;
+// }
 
 static inline void set_rgb(bool is_msb, int x0, const uint8_t *buf,
                            const struct sharp_mip_config *cfg,
@@ -167,17 +234,17 @@ static inline void set_rgb(bool is_msb, int x0, const uint8_t *buf,
 #if CONFIG_SHARP_LS0XXB7_DISPLAY_MODE_COLOR
 
 // Convert from RGB565 to RGB222 by dropping the least significant bits.
-#define CVT_5_TO_2_BITS(val) (((val) >> 3) & 0x03)
-#define CVT_6_TO_2_BITS(val) (((val) >> 4) & 0x03)
+// #define CVT_5_TO_2_BITS(val) (((val) >> 3) & 0x03)
+// #define CVT_6_TO_2_BITS(val) (((val) >> 4) & 0x03)
 
-// TODO: Make this endianess-agnostic.
-// Extract 2-bit R, G, B values from a lil-endian 16-bit RGB565 pointed by buf.
-#define _R(buf) CVT_5_TO_2_BITS(((buf)[1] >> 3) & 0x1f)
-#define _G(buf) CVT_6_TO_2_BITS((((buf)[1] & 0x7) << 3) | ((buf)[0] >> 5))
-#define _B(buf) CVT_5_TO_2_BITS(((buf)[0]) & 0x1f)
+// // TODO: Make this endianess-agnostic.
+// // Extract 2-bit R, G, B values from a lil-endian 16-bit RGB565 pointed by
+// buf. #define _R(buf) CVT_5_TO_2_BITS(((buf)[1] >> 3) & 0x1f) #define _G(buf)
+// CVT_6_TO_2_BITS((((buf)[1] & 0x7) << 3) | ((buf)[0] >> 5)) #define _B(buf)
+// CVT_5_TO_2_BITS(((buf)[0]) & 0x1f)
 
-// Get either MSB or LSB from from a 2-bit value.
-#define GET_SIG_BIT(v, is_msb) ((v) >> ((is_msb) ? 0 : 1) & 0x1)
+// // Get either MSB or LSB from from a 2-bit value.
+// #define GET_SIG_BIT(v, is_msb) ((v) >> ((is_msb) ? 0 : 1) & 0x1)
 
 // Set bit on port register if rgb_idx is on this port.
 #define VAL_BIT_IF_ON_PORT(port, rgb_idx, v2bit)                   \
@@ -201,12 +268,43 @@ static inline void set_rgb(bool is_msb, int x0, const uint8_t *buf,
   // int64_t t0 = k_cycle_get_64();
 
   // For each BCK, we set lsb/msb of pixel x and x + 1
-  const gpio_port_value_t val = VAL_BIT_IF_ON_PORT(port_idx, 0, _R(b + 0)) |
-                                VAL_BIT_IF_ON_PORT(port_idx, 1, _R(b + 2)) |
-                                VAL_BIT_IF_ON_PORT(port_idx, 2, _G(b + 0)) |
-                                VAL_BIT_IF_ON_PORT(port_idx, 3, _G(b + 2)) |
-                                VAL_BIT_IF_ON_PORT(port_idx, 4, _B(b + 0)) |
-                                VAL_BIT_IF_ON_PORT(port_idx, 5, _B(b + 2));
+  // const gpio_port_value_t val_old = VAL_BIT_IF_ON_PORT(port_idx, 0, _R(b +
+  // 0)) |
+  //                                   VAL_BIT_IF_ON_PORT(port_idx, 1, _R(b +
+  //                                   2)) | VAL_BIT_IF_ON_PORT(port_idx, 2,
+  //                                   _G(b + 0)) | VAL_BIT_IF_ON_PORT(port_idx,
+  //                                   3, _G(b + 2)) |
+  //                                   VAL_BIT_IF_ON_PORT(port_idx, 4, _B(b +
+  //                                   0)) | VAL_BIT_IF_ON_PORT(port_idx, 5,
+  //                                   _B(b + 2));
+
+  // Get from LUT.
+  gpio_port_value_t val;
+  uint8_t color_b0 = rgb222((uint16_t)b[1] << 8 | b[0]);
+  uint8_t color_b2 = rgb222((uint16_t)b[3] << 8 | b[2]);
+  // uint8_t color_b2 = rgb222((uint16_t)b[3]);
+  if (is_msb) {
+    val = data->rgb_ports[port_idx].lut_entries[0][color_b0].msb_val |
+          data->rgb_ports[port_idx].lut_entries[1][color_b2].msb_val;
+  } else {
+    val = data->rgb_ports[port_idx].lut_entries[0][color_b0].lsb_val |
+          data->rgb_ports[port_idx].lut_entries[1][color_b2].lsb_val;
+  }
+
+  // even should be 0x
+
+  // LOG_INF(
+  //     "val: 0x%02x | val_old: 0x%02x | is_msb: %d | even: 0x%02x | odd:
+  //     0x%02x "
+  //     "| color_b0: 0x%02x | color_b2: 0x%02x",
+  //     val, val_old, is_msb,
+  //     data->rgb_ports[port_idx].lut_entries[0][color_b0].lsb_val,
+  //     data->rgb_ports[port_idx].lut_entries[1][color_b2].lsb_val, color_b0,
+  //     color_b2);
+  // old
+  // '0b111111000'
+  // new only sets g1 b0 b1 bits on p1.
+  // '0b111000000'
 
   // const gpio_port_value_t val = 0xaf;
   // const gpio_port_value_t val = lut_masks[0][1].val;
@@ -216,11 +314,11 @@ static inline void set_rgb(bool is_msb, int x0, const uint8_t *buf,
   // lut[b[0]].lsb will contain vals for pixel x:
   // port0
 
-  gpio_port_set_masked_raw(data->rgb_ports[port_idx].port,
-                           data->rgb_ports[port_idx].port_mask, val);
+  // gpio_port_set_masked_raw(data->rgb_ports[port_idx].port,
+  //                          data->rgb_ports[port_idx].port_mask, val);
 
-  // NRF_P1->OUTCLR = data->rgb_ports[port_idx].port_mask;
-  // NRF_P1->OUTSET = val;
+  NRF_P1->OUTCLR = data->rgb_ports[port_idx].port_mask;
+  NRF_P1->OUTSET = val;
 
   // This seems to be around the same speed as OUTCLR + OUTSET.
   // const gpio_port_pins_t mask = data->rgb_ports[port_idx].port_mask;
@@ -332,16 +430,16 @@ static inline void send_half_line(bool is_msb, const void *buf,
 
   for (int i = 1; i <= 144; i++) {
     // Toggle BCK: 1 on odd, 0 on even.
-    gpio_pin_set_raw(cfg->bck.port, cfg->bck.pin, i & 1);
+    // gpio_pin_set_raw(cfg->bck.port, cfg->bck.pin, i & 1);
 
     // Optimization.
     // With NRF_P1:
     // NRF_P1->OUT ^= BIT(cfg->bck.pin);
-    // if (i & 1) {
-    //   NRF_P1->OUTSET = BIT(cfg->bck.pin);
-    // } else {
-    //   NRF_P1->OUTCLR = BIT(cfg->bck.pin);
-    // }
+    if (i & 1) {
+      NRF_P1->OUTSET = BIT(cfg->bck.pin);
+    } else {
+      NRF_P1->OUTCLR = BIT(cfg->bck.pin);
+    }
 
     if (i == 2) {
       clear(&cfg->bsp);
@@ -427,10 +525,10 @@ static int sharp_mip_write(const struct device *dev, const uint16_t x,
       uint8_t *line_buf = (uint8_t *)buf + display_line * 35;
 #endif  // CONFIG_SHARP_LS0XXB7_DISPLAY_MODE
 
-      int64_t t0 = k_cycle_get_64();
+      // int64_t t0 = k_cycle_get_64();
       send_half_line(is_msb, line_buf, cfg, dev->data);
-      int64_t t1 = k_cycle_get_64();
-      LOG_INF("send_half_line: %lld", t1 - t0);
+      // int64_t t1 = k_cycle_get_64();
+      // LOG_INF("send_half_line: %lld", t1 - t0);
 
       // With 90 rotation:
 
@@ -444,6 +542,10 @@ static int sharp_mip_write(const struct device *dev, const uint16_t x,
       // Direct NRF_P1, toggling with NRF_P1, val = 0xaf: 101 us.
       // Direct NRF_P1, toggling with NRF_P1, val = correct: 167 us
       // So the RGB calculation is consuming ~66 us.
+
+      // Direct NRF_P1, toggling with NRF_P1, val with dummy LUT:: 101 us
+      // Direct NRF_P1, toggling with NRF_P1, val with real LUT:: 128 us
+      // Basically bypass the RGB calculation altogether.
 
       // Set with gpio_raw_set, toggle with gpio_raw_set, val = correct: 207 us.
 
