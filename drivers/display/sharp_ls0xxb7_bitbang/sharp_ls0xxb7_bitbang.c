@@ -344,8 +344,7 @@ static int sharp_mip_write(const struct device *dev, const uint16_t x,
       uint8_t *line_buf = (uint8_t *)buf + display_line * desc->width * 2;
 #elif CONFIG_SHARP_LS0XXB7_DISPLAY_MODE_MONOCHROME
       // Monochrome buffer, 1 bit per pixel.
-      // Each line has 280 pixels, which is 280 / 8 = 35 bytes.
-      uint8_t *line_buf = (uint8_t *)buf + display_line * 35;
+      uint8_t *line_buf = (uint8_t *)buf + display_line * desc->width / 8;
 #endif  // CONFIG_SHARP_LS0XXB7_DISPLAY_MODE
 
       send_half_line(is_msb, line_buf, cfg, dev->data);
