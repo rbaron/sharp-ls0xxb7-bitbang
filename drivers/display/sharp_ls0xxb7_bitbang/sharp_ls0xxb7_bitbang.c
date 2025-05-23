@@ -11,11 +11,20 @@ LOG_MODULE_REGISTER(sharp_mip_parallel, CONFIG_DISPLAY_LOG_LEVEL);
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/kernel.h>
 
+// Look-up table.
+struct lut_entry {
+  gpio_port_value_t lsb_val;
+  gpio_port_value_t msb_val;
+};
+
 struct rgb_port {
   const struct device *port;
   // Bitmask of GPIO indexed into config->rgb that are connected to this port.
   uint8_t rgb_idx_mask;
   gpio_port_pins_t port_mask;
+
+  // [odd/even][color]
+  struct lut_entry lut_entries[2][256];
 };
 
 // Private mutable data for the driver.
@@ -112,7 +121,63 @@ static int sharp_mip_init(const struct device *dev) {
     }
   }
 
-  LOG_DBG("Sharp MIP display initialized. Resolution: %dx%d", config->width,
+  // Populate look up table.
+  for (int port_idx = 0;
+       port_idx < sizeof(data->rgb_ports) / sizeof(data->rgb_ports[0]);
+       port_idx++) {
+    // Not needed?
+    memset(data->rgb_ports[port_idx].lut_entries, 0,
+           sizeof(data->rgb_ports[port_idx].lut_entries));
+
+    // Pins on this port.
+    const gpio_port_pins_t mask = data->rgb_ports[port_idx].port_mask;
+
+    for (int rgb_idx = 0; rgb_idx < 6; rgb_idx++) {
+      // If this pin is not on this port, continue.
+      if ((mask & BIT(config->rgb[rgb_idx].pin)) == 0) {
+        LOG_INF("Skipping pin %d on port %d (mask: 0x%02x)", rgb_idx, port_idx,
+                mask);
+        continue;
+      }
+
+      // For each possible color, precompute the val on this port.
+      for (int16_t i = 0; i < 256; i++) {
+        const uint8_t r = (i >> 4) & 0x03;
+        const uint8_t g = (i >> 2) & 0x03;
+        const uint8_t b = (i >> 0) & 0x03;
+
+        // Even or odd??
+        uint8_t oe = rgb_idx % 2;
+
+        // Which color?
+        uint8_t color;
+        switch (rgb_idx) {
+          case 0:
+          case 1:
+            color = r;
+            break;
+          case 2:
+          case 3:
+            color = g;
+            break;
+          case 4:
+          case 5:
+            color = b;
+            break;
+        }
+
+        // Set lsb.
+        data->rgb_ports[port_idx].lut_entries[oe][i].lsb_val |=
+            ((color >> 1) << config->rgb[rgb_idx].pin);
+
+        // Set msb.
+        data->rgb_ports[port_idx].lut_entries[oe][i].msb_val |=
+            ((color & 1) << config->rgb[rgb_idx].pin);
+      }
+    }
+  }
+
+  LOG_INF("Sharp MIP display initialized. Resolution: %dx%d", config->width,
           config->height);
 
   for (int i = 0; i < sizeof(data->rgb_ports) / sizeof(data->rgb_ports[0]);
@@ -124,32 +189,19 @@ static int sharp_mip_init(const struct device *dev) {
   return 0;
 }
 
+// Convert from RGB565 to RGB222 by dropping the least significant bits.
+static inline uint8_t rgb222(uint16_t rgb565) {
+  return ((((rgb565 >> 14) & 0x3) << 4) |  // R
+          (((rgb565 >> 9) & 0x3) << 2) |   // G
+          (((rgb565 >> 3) & 0x3) << 0));   // B
+}
+
 static inline void set_rgb(bool is_msb, int x0, const uint8_t *buf,
                            const struct sharp_mip_config *cfg,
                            const struct sharp_mip_data *data) {
 #if CONFIG_SHARP_LS0XXB7_DISPLAY_MODE_COLOR
-
-// Convert from RGB565 to RGB222 by dropping the least significant bits.
-#define CVT_5_TO_2_BITS(val) (((val) >> 3) & 0x03)
-#define CVT_6_TO_2_BITS(val) (((val) >> 4) & 0x03)
-
-// TODO: Make this endianess-agnostic.
-// Extract 2-bit R, G, B values from a lil-endian 16-bit RGB565 pointed by buf.
-#define _R(buf) CVT_5_TO_2_BITS(((buf)[1] >> 3) & 0x1f)
-#define _G(buf) CVT_6_TO_2_BITS((((buf)[1] & 0x7) << 3) | ((buf)[0] >> 5))
-#define _B(buf) CVT_5_TO_2_BITS(((buf)[0]) & 0x1f)
-
-// Get either MSB or LSB from from a 2-bit value.
-#define GET_SIG_BIT(v, is_msb) ((v) >> ((is_msb) ? 0 : 1) & 0x1)
-
-// Set bit on port register if rgb_idx is on this port.
-#define VAL_BIT_IF_ON_PORT(port, rgb_idx, v2bit)                   \
-  ((data->rgb_ports[(port)].rgb_idx_mask & BIT(rgb_idx))           \
-       ? (GET_SIG_BIT((v2bit), is_msb) << cfg->rgb[(rgb_idx)].pin) \
-       : 0)
-
   // Offset into buf for 16-bit RGB565 data at column x0.
-  const uint8_t *b = buf + 2 * x0;
+  const uint8_t *b = buf + (x0 << 1);
 
   for (int port_idx = 0;
        port_idx < sizeof(data->rgb_ports) / sizeof(data->rgb_ports[0]);
@@ -159,15 +211,19 @@ static inline void set_rgb(bool is_msb, int x0, const uint8_t *buf,
       continue;
     }
 
-    const gpio_port_value_t val = VAL_BIT_IF_ON_PORT(port_idx, 0, _R(b + 0)) |
-                                  VAL_BIT_IF_ON_PORT(port_idx, 1, _R(b + 2)) |
-                                  VAL_BIT_IF_ON_PORT(port_idx, 2, _G(b + 0)) |
-                                  VAL_BIT_IF_ON_PORT(port_idx, 3, _G(b + 2)) |
-                                  VAL_BIT_IF_ON_PORT(port_idx, 4, _B(b + 0)) |
-                                  VAL_BIT_IF_ON_PORT(port_idx, 5, _B(b + 2));
+    gpio_port_value_t val;
+    uint8_t color_b0 = rgb222((uint16_t)b[1] << 8 | b[0]);
+    uint8_t color_b2 = rgb222((uint16_t)b[3] << 8 | b[2]);
+    if (is_msb) {
+      val = data->rgb_ports[port_idx].lut_entries[0][color_b0].msb_val |
+            data->rgb_ports[port_idx].lut_entries[1][color_b2].msb_val;
+    } else {
+      val = data->rgb_ports[port_idx].lut_entries[0][color_b0].lsb_val |
+            data->rgb_ports[port_idx].lut_entries[1][color_b2].lsb_val;
+    }
 
-    gpio_port_set_masked(data->rgb_ports[port_idx].port,
-                         data->rgb_ports[port_idx].port_mask, val);
+    gpio_port_set_masked_raw(data->rgb_ports[port_idx].port,
+                             data->rgb_ports[port_idx].port_mask, val);
   }
 
 #elif CONFIG_SHARP_LS0XXB7_DISPLAY_MODE_MONOCHROME
@@ -179,24 +235,39 @@ static inline void set_rgb(bool is_msb, int x0, const uint8_t *buf,
        ? (GET_BUF_BIT((buf), (x)) << cfg->rgb[(rgb_idx)].pin) \
        : 0)
 
-  for (int port_idx = 0;
-       port_idx < sizeof(data->rgb_ports) / sizeof(data->rgb_ports[0]);
-       port_idx++) {
-    // Skip port if it's not connected to any RGB pins.
-    if (data->rgb_ports[port_idx].port == NULL) {
-      continue;
-    }
+  // for (int port_idx = 0;
+  //      port_idx < sizeof(data->rgb_ports) / sizeof(data->rgb_ports[0]);
+  //      port_idx++) {
+  //   // Skip port if it's not connected to any RGB pins.
+  //   if (data->rgb_ports[port_idx].port == NULL) {
+  //     continue;
+  //   }
 
-    const gpio_port_value_t val = VAL_BIT_IF_ON_PORT(port_idx, 0, buf, x0 + 0) |
-                                  VAL_BIT_IF_ON_PORT(port_idx, 1, buf, x0 + 1) |
-                                  VAL_BIT_IF_ON_PORT(port_idx, 2, buf, x0 + 0) |
-                                  VAL_BIT_IF_ON_PORT(port_idx, 3, buf, x0 + 1) |
-                                  VAL_BIT_IF_ON_PORT(port_idx, 4, buf, x0 + 0) |
-                                  VAL_BIT_IF_ON_PORT(port_idx, 5, buf, x0 + 1);
+  const int port_idx = 0;
 
-    gpio_port_set_masked(data->rgb_ports[port_idx].port,
-                         data->rgb_ports[port_idx].port_mask, val);
-  }
+  // const gpio_port_value_t val = VAL_BIT_IF_ON_PORT(port_idx, 0, buf, x0 + 0)
+  // |
+  //                               VAL_BIT_IF_ON_PORT(port_idx, 1, buf, x0 + 1)
+  //                               | VAL_BIT_IF_ON_PORT(port_idx, 2, buf, x0 +
+  //                               0) | VAL_BIT_IF_ON_PORT(port_idx, 3, buf, x0
+  //                               + 1) | VAL_BIT_IF_ON_PORT(port_idx, 4, buf,
+  //                               x0 + 0) | VAL_BIT_IF_ON_PORT(port_idx, 5,
+  //                               buf, x0 + 1);
+
+  // uint8_t state = GET_BUF_BIT(buf, x0) | (GET_BUF_BIT(buf, x0 + 1) << 1);
+
+  // const gpio_port_value_t val = lut_masks[port_idx][state].val;
+  // const gpio_port_value_t val = 0;
+
+  // gpio_port_set_masked(data->rgb_ports[port_idx].port,
+  //                      data->rgb_ports[port_idx].port_mask, val);
+  // NRF_P1->OUTCLR = data->rgb_ports[0].port_mask;
+  // NRF_P1->OUTSET = 0x00;
+
+  const gpio_port_value_t val = 0xaa;
+  const gpio_port_pins_t mask = data->rgb_ports[port_idx].port_mask;
+  NRF_P1->OUT = (NRF_P1->OUT & ~mask) | (val & mask);
+  // }
 
 #endif  // CONFIG_SHARP_LS0XXB7_DISPLAY_MODE
 }
@@ -207,11 +278,6 @@ static inline void set(const struct gpio_dt_spec *gpio) {
 static inline void clear(const struct gpio_dt_spec *gpio) {
   gpio_pin_set_raw(gpio->port, gpio->pin, 0);
 }
-static inline void toggle(const struct gpio_dt_spec *gpio) {
-  int val = gpio_pin_get_raw(gpio->port, gpio->pin);
-  gpio_pin_set_raw(gpio->port, gpio->pin, !val);
-}
-
 static inline void send_half_line(bool is_msb, const void *buf,
                                   const struct sharp_mip_config *cfg,
                                   const struct sharp_mip_data *data) {
@@ -219,14 +285,15 @@ static inline void send_half_line(bool is_msb, const void *buf,
   set(&cfg->bsp);
 
   for (int i = 1; i <= 144; i++) {
-    toggle(&cfg->bck);
+    // Toggle BCK: 1 on odd, 0 on even.
+    gpio_pin_set_raw(cfg->bck.port, cfg->bck.pin, i & 1);
 
     if (i == 2) {
       clear(&cfg->bsp);
     }
     if (i >= 1 && i <= 140) {
       // Prepare RGB pins for the next BCK edge.
-      set_rgb(is_msb, /*x0=*/2 * (i - 1), buf, cfg, data);
+      set_rgb(is_msb, /*x0=*/(i - 1) << 1, buf, cfg, data);
     }
   }
 }
@@ -255,7 +322,8 @@ static int sharp_mip_write(const struct device *dev, const uint16_t x,
   const int gck_last_half_line = gck_offset + 2 * desc->height - 1;
 
   LOG_DBG(
-      "Sharp MIP display write. x: %d, y: %d; buf size: %d (buf height: %d,buf "
+      "Sharp MIP display write. x: %d, y: %d; buf size: %d (buf height: "
+      "%d,buf "
       "width: %d). Offset: %d, last: %d",
       x, y, desc->buf_size, desc->height, desc->width, gck_offset,
       gck_last_half_line);
@@ -266,7 +334,7 @@ static int sharp_mip_write(const struct device *dev, const uint16_t x,
 
   // 1-indexed to match the datasheet and improve debugging.
   for (int i = 1; i <= 568; i++) {
-    toggle(&cfg->gck);
+    gpio_pin_set_raw(cfg->gck.port, cfg->gck.pin, i & 1);
 
     if (i == 2) {
       clear(&cfg->gsp);
@@ -293,6 +361,7 @@ static int sharp_mip_write(const struct device *dev, const uint16_t x,
 #endif  // CONFIG_SHARP_LS0XXB7_DISPLAY_MODE
 
       send_half_line(is_msb, line_buf, cfg, dev->data);
+
       clear(&cfg->gen);
     } else if (i == gck_last_half_line + 1) {
       set(&cfg->gen);
@@ -313,11 +382,6 @@ static void sharp_mip_get_capabilities(
   capabilities->y_resolution = config->height;
 
 #if CONFIG_SHARP_LS0XXB7_DISPLAY_MODE_COLOR
-  // TODO: This is wasteful. We are requesting 16 bits per pixel here, and we
-  // only need 6 bits per pixel. In 2025-03, Zephyr introduced
-  // (https://github.com/zephyrproject-rtos/zephyr/pull/86821) the
-  // PIXEL_FORMAT_L_8. It's intended for 8-bit grayscale, but I think we can
-  // use it for 6-bit color here, saving us half the buffer size.
   capabilities->supported_pixel_formats = PIXEL_FORMAT_RGB_565;
   capabilities->current_pixel_format = PIXEL_FORMAT_RGB_565;
 #elif CONFIG_SHARP_LS0XXB7_DISPLAY_MODE_MONOCHROME
@@ -328,8 +392,6 @@ static void sharp_mip_get_capabilities(
   // We need partial updates to contain full rows. Note that as of writing,
   // this flag only takes effect for monochrome pixel formats.
   capabilities->screen_info = SCREEN_INFO_X_ALIGNMENT_WIDTH;
-
-  // TODO: get from config.
   capabilities->current_orientation = DISPLAY_ORIENTATION_NORMAL;
 }
 
