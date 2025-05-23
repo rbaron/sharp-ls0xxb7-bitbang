@@ -68,6 +68,24 @@ static void vcom_thread(void *config, void *unused1, void *unused2) {
   }
 }
 
+static inline uint8_t get_color_for_pin(uint8_t rgb222, int rgb_idx) {
+  switch (rgb_idx) {
+    case 0:
+    case 1:
+      return (rgb222 >> 4) & 0x03;  // R
+    case 2:
+    case 3:
+      return (rgb222 >> 2) & 0x03;  // G
+    case 4:
+    case 5:
+      return (rgb222 >> 0) & 0x03;  // B
+    default:
+      LOG_ERR("Invalid RGB index: %d", rgb_idx);
+      __ASSERT(false, "Invalid RGB index");
+      return 0;
+  }
+}
+
 #define SET_GPIO_OUTPUT(ret, name)                       \
   do {                                                   \
     if (!device_is_ready(name.port)) {                   \
@@ -133,46 +151,28 @@ static int sharp_mip_init(const struct device *dev) {
     const gpio_port_pins_t mask = data->rgb_ports[port_idx].port_mask;
 
     for (int rgb_idx = 0; rgb_idx < 6; rgb_idx++) {
+      // Even or odd??
+      uint8_t oe = rgb_idx % 2;
+
       // If this pin is not on this port, continue.
       if ((mask & BIT(config->rgb[rgb_idx].pin)) == 0) {
-        LOG_INF("Skipping pin %d on port %d (mask: 0x%02x)", rgb_idx, port_idx,
+        LOG_DBG("Skipping pin %d on port %d (mask: 0x%02x)", rgb_idx, port_idx,
                 mask);
         continue;
       }
 
       // For each possible color, precompute the val on this port.
-      for (int16_t i = 0; i < 256; i++) {
-        const uint8_t r = (i >> 4) & 0x03;
-        const uint8_t g = (i >> 2) & 0x03;
-        const uint8_t b = (i >> 0) & 0x03;
-
-        // Even or odd??
-        uint8_t oe = rgb_idx % 2;
-
-        // Which color?
-        uint8_t color;
-        switch (rgb_idx) {
-          case 0:
-          case 1:
-            color = r;
-            break;
-          case 2:
-          case 3:
-            color = g;
-            break;
-          case 4:
-          case 5:
-            color = b;
-            break;
-        }
+      for (int16_t color = 0; color < 256; color++) {
+        // Which color for this pin?
+        uint8_t pin_color = get_color_for_pin(color, rgb_idx);
 
         // Set lsb.
-        data->rgb_ports[port_idx].lut_entries[oe][i].lsb_val |=
-            ((color >> 1) << config->rgb[rgb_idx].pin);
+        data->rgb_ports[port_idx].lut_entries[oe][color].lsb_val |=
+            ((pin_color >> 1) << config->rgb[rgb_idx].pin);
 
         // Set msb.
-        data->rgb_ports[port_idx].lut_entries[oe][i].msb_val |=
-            ((color & 1) << config->rgb[rgb_idx].pin);
+        data->rgb_ports[port_idx].lut_entries[oe][color].msb_val |=
+            ((pin_color & 1) << config->rgb[rgb_idx].pin);
       }
     }
   }
