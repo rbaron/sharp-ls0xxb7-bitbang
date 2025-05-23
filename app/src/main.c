@@ -10,11 +10,11 @@
 
 LOG_MODULE_REGISTER(main, CONFIG_DISPLAY_LOG_LEVEL);
 
-// #define DISPLAY_H DT_PROP(DT_NODELABEL(sharp_display), height)
-// #define DISPLAY_W DT_PROP(DT_NODELABEL(sharp_display), width)
+#define DISPLAY_NODE DT_CHOSEN(zephyr_display)
+#define WIDTH DT_PROP(DISPLAY_NODE, width)
+#define HEIGHT DT_PROP(DISPLAY_NODE, height)
 
 static const struct device *display_dev =
-    // DEVICE_DT_GET(DT_NODELABEL(sharp_display));
     DEVICE_DT_GET(DT_CHOSEN(zephyr_display));
 
 static const struct gpio_dt_spec vddio_en =
@@ -25,10 +25,24 @@ static const struct gpio_dt_spec vbus_en =
 static const struct gpio_dt_spec led0 =
     GPIO_DT_SPEC_GET(DT_NODELABEL(led0), gpios);
 
+// The display does support partial updates, but only at full rows. I.e. we can
+// start drawing at arbitrary y up to arbitrary height, but only at x0 = x0 and
+// x1 = WIDTH - 1.
+static void my_lvgl_rounder_cb(lv_event_t *e) {
+  lv_area_t *area = lv_event_get_param(e);
+  area->x1 = 0;
+  area->x2 = WIDTH - 1;
+}
+
 int main(void) {
   gpio_pin_configure_dt(&vddio_en, GPIO_OUTPUT_HIGH);
   gpio_pin_configure_dt(&vbus_en, GPIO_OUTPUT_HIGH);
   gpio_pin_configure_dt(&led0, GPIO_OUTPUT);
+
+  // Set up the area rounder.
+  lv_display_t *display = lv_disp_get_default();
+  lv_display_add_event_cb(display, my_lvgl_rounder_cb, LV_EVENT_INVALIDATE_AREA,
+                          display);
 
   // Power up.
   gpio_pin_set_dt(&vddio_en, 1);
@@ -43,38 +57,35 @@ int main(void) {
 
   lv_obj_t *scr = lv_scr_act();
 
+  static lv_style_t style_bg_white;
+  lv_style_init(&style_bg_white);
+  lv_style_set_bg_color(&style_bg_white, lv_color_white());
+  lv_style_set_bg_opa(&style_bg_white, LV_OPA_COVER);
+  lv_obj_add_style(scr, &style_bg_white, LV_PART_MAIN);
+
   // Square.
   lv_obj_t *square = lv_obj_create(scr);
   lv_obj_set_style_bg_opa(square, LV_OPA_COVER, LV_PART_MAIN);
-  lv_obj_set_size(square, 128, 128);
-  lv_obj_align(square, LV_ALIGN_CENTER, 0, 0);
+  lv_obj_set_size(square, WIDTH, 40);
+  lv_obj_set_style_border_color(square, lv_color_white(), LV_PART_MAIN);
+  lv_obj_align(square, LV_ALIGN_TOP_MID, 0, 0);
 
   // Text.
   lv_obj_t *label = lv_label_create(scr);
   lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
-  lv_obj_set_width(label, 110);
   lv_label_set_text(label, "Hello, world");
-  lv_obj_align(label, LV_ALIGN_CENTER, 0, 0);
+  lv_obj_align(label, LV_ALIGN_BOTTOM_MID, 0, -64);
 
 #if CONFIG_SHARP_LS0XXB7_DISPLAY_MODE_MONOCHROME
   lv_obj_set_style_bg_color(square, lv_color_black(), LV_PART_MAIN);
 #elif CONFIG_SHARP_LS0XXB7_DISPLAY_MODE_COLOR
   // Paint background white.
-  static lv_style_t style_bg_white;
-  lv_style_init(&style_bg_white);
-  lv_style_set_bg_color(&style_bg_white, lv_color_white());
-  // lv_style_set_bg_color(&style_bg_white, lv_color_hex(0x0000ff));
-  lv_style_set_bg_opa(&style_bg_white, LV_OPA_COVER);
-  lv_obj_add_style(scr, &style_bg_white, LV_PART_MAIN);
 
   // Square.
   static lv_style_t style;
   lv_style_init(&style);
   lv_style_set_bg_color(&style, lv_color_hex(0x00ff00));
-  lv_style_set_border_color(&style, lv_color_hex(0x0000ff));
-  lv_style_set_border_width(&style, 4);
   lv_obj_add_style(square, &style, LV_PART_MAIN);
-  lv_obj_update_layout(square);
 
   // Paint text red.
   static lv_style_t style_red;
@@ -83,16 +94,12 @@ int main(void) {
   lv_obj_add_style(label, &style_red, LV_PART_MAIN);
 #endif  // CONFIG_SHARP_LS0XXB7_DISPLAY_MODE_COLOR
 
-  int x = 100;
-  char buf[32];
+  int y = 0;
   while (1) {
     lv_task_handler();
-    k_msleep(1000);
+    k_msleep(1);
 
-    // Update counter.
-    snprintf(buf, sizeof(buf), "x: %d", x);
-    lv_label_set_text(label, buf);
-    x += 1;
+    lv_obj_set_y(square, y++ % (HEIGHT - 40));
   }
 
   return 0;
