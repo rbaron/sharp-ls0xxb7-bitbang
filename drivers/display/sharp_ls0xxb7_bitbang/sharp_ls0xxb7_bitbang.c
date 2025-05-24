@@ -282,9 +282,6 @@ static inline void clear(const struct gpio_dt_spec *gpio) {
 static inline void send_half_line(bool is_msb, const void *buf,
                                   const struct sharp_mip_config *cfg,
                                   const struct sharp_mip_data *data) {
-  clear(&cfg->bsp);
-  set(&cfg->bsp);
-
   for (int i = 1; i <= 144; i++) {
     // Toggle BCK: 1 on odd, 0 on even.
     gpio_pin_set_raw(cfg->bck.port, cfg->bck.pin, i & 1);
@@ -295,6 +292,14 @@ static inline void send_half_line(bool is_msb, const void *buf,
     if (i >= 1 && i <= 140) {
       // Prepare RGB pins for the next BCK edge.
       set_rgb(is_msb, /*x0=*/(i - 1) << 1, buf, cfg, data);
+    }
+    if (i == 142) {
+      set(&cfg->gen);
+    }
+    if (i == 144) {
+      clear(&cfg->gen);
+      clear(&cfg->gck);
+      set(&cfg->bsp);
     }
   }
 }
@@ -329,10 +334,6 @@ static int sharp_mip_write(const struct device *dev, const uint16_t x,
       x, y, desc->buf_size, desc->height, desc->width, gck_offset,
       gck_last_half_line);
 
-  clear(&cfg->gck);
-  set(&cfg->intb);
-  set(&cfg->gsp);
-
   // 1-indexed to match the datasheet and improve debugging.
   for (int i = 1; i <= 568; i++) {
     gpio_pin_set_raw(cfg->gck.port, cfg->gck.pin, i & 1);
@@ -344,8 +345,6 @@ static int sharp_mip_write(const struct device *dev, const uint16_t x,
     if (i == gck_offset) {
       send_half_line(/*is_msb=*/true, buf, cfg, dev->data);
     } else if (i >= gck_offset + 1 && i <= gck_last_half_line) {
-      set(&cfg->gen);
-
       // This display sends MSB for a full line at a GCK edge and then the LSB
       // for the same line at the next GCK edge.
       const uint16_t display_line = (i - gck_offset) / 2;
@@ -362,12 +361,11 @@ static int sharp_mip_write(const struct device *dev, const uint16_t x,
 
       send_half_line(is_msb, line_buf, cfg, dev->data);
 
-      clear(&cfg->gen);
-    } else if (i == gck_last_half_line + 1) {
-      set(&cfg->gen);
-      clear(&cfg->gen);
     } else if (i == 566) {
       clear(&cfg->intb);
+    } else if (i == 568) {
+      set(&cfg->intb);
+      set(&cfg->gsp);
     }
   }
 
