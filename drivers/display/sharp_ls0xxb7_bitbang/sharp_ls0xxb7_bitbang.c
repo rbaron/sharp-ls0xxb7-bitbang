@@ -1,7 +1,28 @@
 /*
- *  Bit-banging driver for Sharp LS0XXB7 displays. It currently only works with
- *  the LS014B7DD01 display.
- */
+
+Bit-banging driver for Sharp LS0XXB7 displays. It currently only works with the
+LS014B7DD01 display.
+
+Copyright © 2025 rbaron
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the “Software”), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software is furnished to do so,
+subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
+COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
+IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+*/
 
 #include <zephyr/logging/log.h>
 LOG_MODULE_REGISTER(sharp_mip_parallel, CONFIG_DISPLAY_LOG_LEVEL);
@@ -18,8 +39,7 @@ struct lut_entry {
 
 struct rgb_port {
   const struct device *port;
-  // Bitmask of GPIO indexed into config->rgb that are connected to this port.
-  uint8_t rgb_idx_mask;
+  // Mask of RGB pins on this port.
   gpio_port_pins_t port_mask;
 
   // Lookup table from (odd/even, color) -> which pins to set on this port.
@@ -131,7 +151,6 @@ static int sharp_mip_init(const struct device *dev) {
       if (data->rgb_ports[port_idx].port == config->rgb[gpio_idx].port ||
           data->rgb_ports[port_idx].port == NULL) {
         data->rgb_ports[port_idx].port = config->rgb[gpio_idx].port;
-        data->rgb_ports[port_idx].rgb_idx_mask |= (1 << gpio_idx);
         data->rgb_ports[port_idx].port_mask |= (1 << config->rgb[gpio_idx].pin);
         break;
       }
@@ -181,8 +200,8 @@ static int sharp_mip_init(const struct device *dev) {
 
   for (int i = 0; i < sizeof(data->rgb_ports) / sizeof(data->rgb_ports[0]);
        i++) {
-    LOG_DBG("RGB port %d: %p, mask: 0x%02x", i, data->rgb_ports[i].port,
-            data->rgb_ports[i].rgb_idx_mask);
+    LOG_DBG("RGB port %d: %p, port_mask: 0x%08x", i, data->rgb_ports[i].port,
+            data->rgb_ports[i].port_mask);
   }
 
   return 0;
@@ -227,13 +246,6 @@ static inline void set_rgb(bool is_msb, int x0, const uint8_t *buf,
 
 #elif CONFIG_SHARP_LS0XXB7_DISPLAY_MODE_MONOCHROME
 
-#define GET_BUF_BIT(buf, x) (((uint8_t *)buf)[(x) / 8] >> ((x) % 8) & 0x1)
-
-#define VAL_BIT_IF_ON_PORT(port, rgb_idx, buf, x)             \
-  ((data->rgb_ports[(port)].rgb_idx_mask & BIT(rgb_idx))      \
-       ? (GET_BUF_BIT((buf), (x)) << cfg->rgb[(rgb_idx)].pin) \
-       : 0)
-
   for (int port_idx = 0;
        port_idx < sizeof(data->rgb_ports) / sizeof(data->rgb_ports[0]);
        port_idx++) {
@@ -243,8 +255,9 @@ static inline void set_rgb(bool is_msb, int x0, const uint8_t *buf,
     }
 
     gpio_port_value_t val;
-    uint8_t color_bx0 = GET_BUF_BIT(buf, x0 + 0) ? 0xff : 0x00;
-    uint8_t color_bx1 = GET_BUF_BIT(buf, x0 + 1) ? 0xff : 0x00;
+    uint8_t b = (buf[x0 / 8] >> (x0 % 8)) & 0x03;
+    uint8_t color_bx0 = (b & BIT(0)) ? 0xff : 0x00;
+    uint8_t color_bx1 = (b & BIT(1)) ? 0xff : 0x00;
     if (is_msb) {
       val = data->rgb_ports[port_idx].lut_entries[0][color_bx0].msb_val |
             data->rgb_ports[port_idx].lut_entries[1][color_bx1].msb_val;
@@ -391,8 +404,8 @@ struct display_driver_api sharp_mip_driver_api = {
   static struct sharp_mip_data data_##node_id = {                  \
       .rgb_ports =                                                 \
           {                                                        \
-              {.port = NULL, .rgb_idx_mask = 0, .port_mask = 0},   \
-              {.port = NULL, .rgb_idx_mask = 0, .port_mask = 0},   \
+              {.port = NULL, .port_mask = 0},                      \
+              {.port = NULL, .port_mask = 0},                      \
           },                                                       \
   };                                                               \
   static const struct sharp_mip_config config_##node_id = {        \
